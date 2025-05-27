@@ -21,9 +21,13 @@ class MarioIdleDeathWrapper(Wrapper):
         self.max_idle_steps = max_idle_steps
         self.idle_counter = 0
         self.last_x_pos = 0
+        self.episode_reward = 0
+        self.episode_length = 0
 
     def reset(self, **kwargs):
         self.idle_counter = 0
+        self.episode_reward = 0
+        self.episode_length = 0
         obs = self.env.reset(**kwargs)
         self.last_x_pos = self._get_x_pos()
         return obs
@@ -31,6 +35,9 @@ class MarioIdleDeathWrapper(Wrapper):
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         current_x = self._get_x_pos()
+
+        self.episode_reward += reward
+        self.episode_length += 1
 
         if current_x == self.last_x_pos:
             self.idle_counter += 1
@@ -41,6 +48,10 @@ class MarioIdleDeathWrapper(Wrapper):
         if self.idle_counter >= self.max_idle_steps:
             done = True
             info["idle_death"] = True
+            info["episode"] = {
+                "r": self.episode_reward,
+                "l": self.episode_length
+            }
 
         return obs, reward, done, info
 
@@ -114,7 +125,8 @@ if __name__ == '__main__':
       vec_env,
       verbose=1,
       tensorboard_log=log_dir,
-      device="cuda"
+      device="cuda",
+      n_steps=1024
   )
 
   # ===== Evaluation Environment and Callback =====
