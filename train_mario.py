@@ -1,17 +1,20 @@
 import os
 import gym
 import numpy as np
+import gym_super_mario_bros
 from gym import Wrapper
-from stable_baselines3 import PPO
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from nes_py.wrappers import JoypadSpace
-from stable_baselines3.common.vec_env import DummyVecEnv, VecVideoRecorder
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder, DummyVecEnv, VecTransposeImage
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from torch.utils.tensorboard import SummaryWriter
+import torch
 
 # ===== Custom Wrappers =====
-
 class MarioIdleDeathWrapper(Wrapper):
     def __init__(self, env, max_idle_steps=60):
         super().__init__(env)
@@ -42,10 +45,9 @@ class MarioIdleDeathWrapper(Wrapper):
         return obs, reward, done, info
 
     def _get_x_pos(self):
-        return self.env.unwrapped._env.env.env.env.x_position
+        return getattr(self.env.unwrapped, "x_position", 0)
 
-# ===== Custom Callback for TensorBoard =====
-
+# ===== Custom Callback =====
 class CustomTensorboardCallback(BaseCallback):
     def __init__(self, verbose=0):
         super().__init__(verbose)
@@ -77,39 +79,80 @@ class CustomTensorboardCallback(BaseCallback):
             self.logger.record("custom/avg_episode_reward", np.mean(self.episode_rewards))
             self.logger.record("custom/avg_episode_length", np.mean(self.episode_lengths))
 
-# ===== Environment Setup =====
+# ===== Environment Factory =====
+def make_env():
+    def _init():
+        env = gym_super_mario_bros.make("SuperMarioBros-v0")
+        env = JoypadSpace(env, COMPLEX_MOVEMENT)
+        env = Monitor(env)
+        env = MarioIdleDeathWrapper(env)
+        return env
+    return _init
 
-video_folder = "./videos/"
-log_dir = "./logs/"
-os.makedirs(log_dir, exist_ok=True)
+if __name__ == '__main__':
 
-env = gym_super_mario_bros.make("SuperMarioBros-v0")
-env = JoypadSpace(env, COMPLEX_MOVEMENT)
-env = Monitor(env)
-env = MarioIdleDeathWrapper(env)
-env = DummyVecEnv([lambda: env])
-env = VecVideoRecorder(
-    env, video_folder,
-    record_video_trigger=lambda step: step % 200_000 == 0,
-    video_length=3600,
-    name_prefix="mario-train"
-)
+  # ===== Setup Parallel Environments =====
+  num_envs = 4
+  log_dir = "./logs/"
+  video_folder = "./videos/"
 
-# ===== Training =====
+  os.makedirs(log_dir, exist_ok=True)
+  os.makedirs(video_folder, exist_ok=True)
 
-model = PPO("CnnPolicy", env, verbose=1, tensorboard_log=log_dir, device="cuda")
-model.learn(total_timesteps=1_000_000, callback=CustomTensorboardCallback())
-model.save("ppo_mario_checkpoint_1m")
+  vec_env = SubprocVecEnv([make_env() for _ in range(num_envs)])
+  vec_env = VecVideoRecorder(
+      vec_env,
+      video_folder,
+      record_video_trigger=lambda step: step % 50000 == 0,
+      video_length=3600,
+      name_prefix="mario-train"
+  )
 
-model.learn(total_timesteps=1_000_000, callback=CustomTensorboardCallback())
-model.save("ppo_mario_2m_final")
+  # ===== Model Setup =====
+  model = PPO(
+      "CnnPolicy",
+      vec_env,
+      verbose=1,
+      tensorboard_log=log_dir,
+      device="cuda"
+  )
 
-# ===== Evaluation =====
+  # ===== Evaluation Environment and Callback =====
+  def make_eval_env():
+      env = gym_super_mario_bros.make("SuperMarioBros-v0")
+      env = JoypadSpace(env, COMPLEX_MOVEMENT)
+      env = Monitor(env)
+      env = MarioIdleDeathWrapper(env)
+      vec_env = DummyVecEnv([lambda: env])
+      vec_env = VecTransposeImage(vec_env)
+      return vec_env
 
-eval_env = gym_super_mario_bros.make("SuperMarioBros-v0")
-eval_env = JoypadSpace(eval_env, COMPLEX_MOVEMENT)
-eval_env = Monitor(eval_env)
-eval_env = DummyVecEnv([lambda: eval_env])
+  eval_env = make_eval_env()
 
-mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5)
-print(f"Mean reward after training: {mean_reward}")
+  eval_callback = EvalCallback(
+      eval_env,
+      best_model_save_path="./checkpoints/",
+      log_path="./eval_logs/",
+      eval_freq=100_000,
+      n_eval_episodes=5,
+      deterministic=True,
+      render=False
+  )
+
+  # ===== Training with Callback =====
+  callback = CustomTensorboardCallback()
+
+  model.learn(total_timesteps=1_000_000, callback=[callback, eval_callback])
+  model.save("ppo_mario_checkpoint_1m")
+
+  callback.episode_rewards = []
+  callback.episode_lengths = []
+  callback.idle_deaths = 0
+  callback.episode_count = 0
+
+  model.learn(total_timesteps=1_000_000, callback=[callback, eval_callback])
+  model.save("ppo_mario_2m_final")
+
+  # ===== Final Evaluation =====
+  mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5)
+  print(f"Mean reward after training: {mean_reward}")
