@@ -3,8 +3,9 @@ import gym
 import numpy as np
 import gym_super_mario_bros
 from gym import Wrapper
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 from nes_py.wrappers import JoypadSpace
+from custom_policy import CustomCnnPolicy
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder, DummyVecEnv, VecTransposeImage
@@ -16,7 +17,7 @@ import torch
 
 # ===== Custom Wrappers =====
 class MarioIdleDeathWrapper(Wrapper):
-    def __init__(self, env, max_idle_steps=60):
+    def __init__(self, env, max_idle_steps=120):
         super().__init__(env)
         self.max_idle_steps = max_idle_steps
         self.idle_counter = 0
@@ -94,7 +95,7 @@ class CustomTensorboardCallback(BaseCallback):
 def make_env():
     def _init():
         env = gym_super_mario_bros.make("SuperMarioBros-v0")
-        env = JoypadSpace(env, COMPLEX_MOVEMENT)
+        env = JoypadSpace(env, SIMPLE_MOVEMENT)
         env = Monitor(env)
         env = MarioIdleDeathWrapper(env)
         return env
@@ -103,7 +104,7 @@ def make_env():
 if __name__ == '__main__':
 
   # ===== Setup Parallel Environments =====
-  num_envs = 4
+  num_envs = 8
   log_dir = "./logs/"
   video_folder = "./videos/"
 
@@ -121,18 +122,22 @@ if __name__ == '__main__':
 
   # ===== Model Setup =====
   model = PPO(
-      "CnnPolicy",
+      CustomCnnPolicy,
       vec_env,
+      learning_rate=1e-4,
       verbose=1,
       tensorboard_log=log_dir,
       device="cuda",
-      n_steps=1024
+      n_steps=512,
+      batch_size=16,
+      gamma=0.9,
+      n_epochs=10
   )
 
   # ===== Evaluation Environment and Callback =====
   def make_eval_env():
       env = gym_super_mario_bros.make("SuperMarioBros-v0")
-      env = JoypadSpace(env, COMPLEX_MOVEMENT)
+      env = JoypadSpace(env, SIMPLE_MOVEMENT)
       env = Monitor(env)
       env = MarioIdleDeathWrapper(env)
       vec_env = DummyVecEnv([lambda: env])
